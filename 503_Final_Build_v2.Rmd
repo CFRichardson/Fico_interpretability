@@ -1,0 +1,292 @@
+---
+title: "ADS 503 Final Project"
+author: "Claire Phibbs, Christopher Richardson, & Martin Zagari"
+date: '2022-06-17'
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r Library Setup, include=FALSE}
+library(caret)
+library(DataExplorer)
+library(dplyr)
+library(glmnet)
+library(ggplot2)
+library(lattice)
+library(kableExtra)
+library(knitr)
+library(MASS)
+library(pamr)
+library(pROC)
+library(Rcpp)
+library(ROCR)
+library(RANN)
+library(tidyr)
+library(tidyverse)
+```
+
+## The Data
+Our target variable "Risk Performance" along with the first 13 predictor columns
+```{r Data view First 13 columms}
+heloc <- read.csv('/Users/transformative/Desktop/heloc_dataset_v1.csv')
+
+# sort col names for readability purposes
+heloc <- heloc[ , order(names(heloc))]
+
+kable(heloc[1:4,c(24,1:13)]) %>%
+  kableExtra::kable_styling("striped", full_width = F) %>%
+  kableExtra::row_spec(0, angle = -90)
+```
+
+Predictor columns 14 to 23
+```{r Data view First rest columms}
+kable(heloc[1:4,c(24,14:23)]) %>%
+  kableExtra::kable_styling("striped", full_width = F) %>%
+  kableExtra::row_spec(0, angle = -90)
+```
+
+### Data Pre-Processing
+```{r DF Introduction}
+plot_intro(heloc)
+```
+
+```{r pre-processing}
+# -9 = No Credit History
+# -8 and -7 = No recent activity
+heloc[heloc == -9] <- NA
+heloc[heloc == -8] <- NA
+heloc[heloc == -7] <- NA
+plot_intro(heloc)
+```
+It appears that roughly 76.1% of our data had one or more predictors had a -9,-8,-7.
+
+```{r ALL NULL removal}
+# removing missing values from rows that span across all columns (588 values)
+heloc_No_NA <- heloc %>% filter_at(vars(-RiskPerformance),any_vars(!is.na(.)))
+plot_intro(heloc_No_NA)
+```
+
+
+```{r EDA, fig.height=10}
+# correlations
+corrplot::corrplot(cor(heloc_No_NA[ ,-24]),
+                   method = 'number',
+                   tl.cex = 1.2,
+                   number.cex = 1.5)
+```
+
+```{r Outcome Table, fig.height=10}
+# bar plot of response variable; RiskPerformance
+barplot(table(heloc_No_NA$RiskPerformance), main="Plot of Response Variable: RiskPerformance", xlab="RiskPerformance")
+```
+
+```{r Data Histograms}
+# boxplot to view outliers
+boxplot(heloc_No_NA[, 1:23])
+# histograms to view predictor variable frequencies
+par(mfrow=c(3,4))
+Hmisc::hist.data.frame(heloc_No_NA[,1:23])
+``` 
+
+```{r Imputation}
+# create training indices
+set.seed(3)
+heloc_training <- createDataPartition(heloc_No_NA$RiskPerformance, p=0.8, list=FALSE)
+
+# training/set sets
+heloc_train <- heloc_No_NA[heloc_training, ]
+heloc_test <- heloc_No_NA[-heloc_training, ]
+
+# knn imputation
+heloc_impute <- preProcess(heloc_train, method = 'knnImpute')
+heloc_train <- predict(heloc_impute, newdata=heloc_train)
+heloc_test <- predict(heloc_impute, newdata=heloc_test)
+
+# remove highly correlated predictors
+high_corr <- findCorrelation(cor(heloc_train[, -24]), 0.85)
+
+heloc_train <- heloc_train[, -(high_corr)]
+heloc_test <- heloc_test[, -(high_corr)]
+names(heloc_test[high_corr])
+```
+
+```{r train/test split}
+# Deselect Bool Outcome/Response/Target variable
+bool <- names(heloc_train) != 'RiskPerformance'
+
+# x = predictors
+heloc_train_x <- heloc_train[,bool]
+heloc_test_x <- heloc_test[,bool]
+
+# y = response/target
+heloc_train_y <- heloc_train[,'RiskPerformance']
+heloc_test_y <- heloc_test[,'RiskPerformance']
+```
+
+```{r train control setup}
+control <- trainControl(method="cv",
+                        classProbs=TRUE,
+                        savePredictions=TRUE,
+                        summaryFunction=twoClassSummary)
+```
+
+
+
+# Models
+
+## Logistic Regression
+
+```{r logistic regression}
+set.seed(100)
+logregModel <- train(x=heloc_train_x, y=heloc_train_y, method="glm", metric="ROC", trControl=control)
+
+testResults <- data.frame(obs=heloc_test_y,
+                          logregModel=predict(logregModel, heloc_test_x))
+
+logregModel
+```
+```{r logistic regression coeffs}
+logregModel$finalModel$coefficients
+```
+
+```{r logistic regression confusion matrix}
+confusionMatrix(testResults$logregModel,
+                as.factor(testResults$obs), positive="Good")
+```
+
+```{r logistic regression variable importance}
+plot(varImp(logregModel, scale=FALSE), top=20)
+varImp(logregModel, scale=FALSE)
+```
+
+## LDA
+```{r LDA}
+set.seed(100)
+ldaModel <- train(x=heloc_train_x,
+                   y=heloc_train_y,
+                   method="lda",
+                   metric="ROC",
+                   trControl=control)
+ldaModel
+```
+
+```{r LDA Confusion Matrix}
+testResults$ldaModel <- predict(ldaModel, heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$ldaModel,
+                as.factor(testResults$obs), positive="Good")
+```
+
+## Penalized Logistic Regression
+```{r penalized logistic regression}
+set.seed(100)
+glmnGrid <- expand.grid(alpha=c(0, 0.1, 0.2, 0.4, 0.6, 0.8, 1),
+                        lambda=seq(0.01, 0.2, length=5))
+
+logregPenalizedModel <- train(x=heloc_train_x,
+                                y=heloc_train_y,
+                                method="glmnet",
+                                metric="ROC",
+                                tuneGrid=glmnGrid,
+                                trControl=control)
+logregPenalizedModel
+```
+
+```{r penalized LR Confusion Matrix}
+testResults$logregPenalizedModel <- predict(logregPenalizedModel,
+                                              heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$logregPenalizedModel,
+                as.factor(testResults$obs), positive="Good")
+```
+## Classification Trees
+
+```{r rpart model build}
+rpartModel <- rpart::rpart(RiskPerformance ~ ., data=heloc_train)
+testResults$rpart <- predict(rpartModel, heloc_test_x)
+
+rpartModel
+```
+
+# ```{r rpart confusion matrix}
+# confusionMatrix(testResults$rpart,
+#                 as.factor(testResults$obs), positive="Good")
+# ```
+
+
+<!-- ```{r} -->
+<!--  predict(rpart_model, heloc_test_x) -->
+<!-- ``` -->
+
+
+```{r neural network}
+set.seed(100)
+nnetGrid <- expand.grid(size = 1:3, decay = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 2))
+nnetModel <- train(x = heloc_train_x,
+                    y = heloc_train_y,
+                    method = "nnet",
+                    tuneGrid = nnetGrid,
+                    metric = "ROC",
+                    trace = FALSE,
+                    maxit = 2000,
+                    trControl = control)
+nnetModel
+```
+
+```{r neural network Confusion Matrix}
+testResults$nnetModel <- predict(nnetModel,
+                                  heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$nnetModel,
+                as.factor(testResults$obs), positive="Good")
+```
+
+
+```{r Boosted Tree}
+gbmGrid <- expand.grid(interaction.depth = c(6),
+                       n.trees = 1000,
+                       shrinkage = c(0.01, 0.1),
+                       n.minobsinnode = 5)
+set.seed(100)
+gbmModel <- train(x = heloc_train_x,
+                   y = heloc_train_y,
+                   method = "gbm",
+                   tuneGrid = gbmGrid,
+                   verbose = FALSE,
+                   metric = "ROC",
+                   trControl= control)
+gbmModel
+```
+
+
+```{r Boosted Tree Confusion Matrix}
+testResults$gbmModel <- predict(gbmModel,
+                                 heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$gbmModel,
+                as.factor(testResults$obs), positive="Good")
+```
+
+```{r Flexible Discriminant}
+set.seed(100)
+fdaModel <- train(x = heloc_train_x,
+                   y = heloc_train_y,
+                   method = "fda",
+                   metric = "ROC",
+                   trControl=control)
+fdaModel
+```
+
+```{r}
+testResults$fdaModel <- predict(fdaModel,
+                                 heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$fdaModel,
+                as.factor(testResults$obs), positive="Good")
+```
+
+
+```{r}
+
+```
