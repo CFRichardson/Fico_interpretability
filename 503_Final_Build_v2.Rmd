@@ -1,6 +1,6 @@
 ---
 title: "ADS 503 Final Project"
-author: "Claire Phibbs, Christopher Richardson, & Martin Zagari"
+author: "Claire Phibbs, Christopher Richardson, Martin Zagari"
 date: '2022-06-17'
 output:
   pdf_document: default
@@ -19,105 +19,159 @@ library(knitr)
 library(MASS)
 library(pamr)
 library(pROC)
+library(RANN)
+library(randomForest)
 library(Rcpp)
 library(ROCR)
-library(RANN)
 library(tidyr)
 library(tidyverse)
 ```
 
-## The Data
+# The Data
 Our target variable "Risk Performance" along with the first 13 predictor columns
 ```{r Data view First 13 columms}
-heloc <- read.csv('/Users/transformative/Desktop/heloc_dataset_v1.csv')
+file_loc <- '/Volumes/GoogleDrive/My Drive/503/Project 503/Fico Data/heloc_dataset_v1.csv'
+heloc <- read.csv(file_loc)
 
 # sort col names for readability purposes
 heloc <- heloc[ , order(names(heloc))]
 
-kable(heloc[1:4,c(24,1:13)]) %>%
+knitr::kable(heloc[1:4,c(24,1:13)]) %>%
   kableExtra::kable_styling("striped", full_width = F) %>%
   kableExtra::row_spec(0, angle = -90)
 ```
 
 Predictor columns 14 to 23
 ```{r Data view First rest columms}
-kable(heloc[1:4,c(24,14:23)]) %>%
+knitr::kable(heloc[1:4,c(24,14:23)]) %>%
   kableExtra::kable_styling("striped", full_width = F) %>%
   kableExtra::row_spec(0, angle = -90)
 ```
 
-### Data Pre-Processing
-```{r DF Introduction}
-plot_intro(heloc)
+# Data Pre-Processing
+```{r DF Introduction, fig.height=4}
+DataExplorer::plot_intro(heloc)
 ```
 
-```{r pre-processing}
+```{r pre-processing, fig.height=4}
 # -9 = No Credit History
 # -8 and -7 = No recent activity
 heloc[heloc == -9] <- NA
 heloc[heloc == -8] <- NA
 heloc[heloc == -7] <- NA
-plot_intro(heloc)
+DataExplorer::plot_intro(heloc)
 ```
 It appears that roughly 76.1% of our data had one or more predictors had a -9,-8,-7.
 
-```{r ALL NULL removal}
+```{r ALL NULL removal, fig.height=4}
 # removing missing values from rows that span across all columns (588 values)
-heloc_No_NA <- heloc %>% filter_at(vars(-RiskPerformance),any_vars(!is.na(.)))
-plot_intro(heloc_No_NA)
+heloc_No_NA <- heloc %>% dplyr::filter_at(vars(-RiskPerformance),
+                                          any_vars(!is.na(.)))
+DataExplorer::plot_intro(heloc_No_NA)
+```
+```{r KNN Impute Full DF}
+# WARNING: Data leakage will occur if the following df is used for any modeling!
+# data set is primarily for graphical purposes only!
+
+# knn imputation
+heloc_impute <- caret::preProcess(heloc_No_NA,
+                                  method = 'knnImpute')
+
+heloc_imputed_full_set <- stats::predict(heloc_impute,
+                              newdata=heloc_No_NA)
 ```
 
-
-```{r EDA, fig.height=10}
+```{r Corr Plot, eval=FALSE}
 # correlations
-corrplot::corrplot(cor(heloc_No_NA[ ,-24]),
+cor_plot <- corrplot::corrplot(stats::cor(heloc_imputed_full_set[ ,-24]),
                    method = 'number',
                    tl.cex = 1.2,
                    number.cex = 1.5)
 ```
+#### Correlation Plot
 
-```{r Outcome Table, fig.height=10}
+<div style="width:750px; height:750px">
+![](/Volumes/GoogleDrive/My Drive/503/Project 503/000030.png)
+</div>
+
+```{r Outcome Table, fig.height=5}
 # bar plot of response variable; RiskPerformance
-barplot(table(heloc_No_NA$RiskPerformance), main="Plot of Response Variable: RiskPerformance", xlab="RiskPerformance")
+barplot(table(heloc_No_NA$RiskPerformance),
+        main="Plot of Response Variable: RiskPerformance",
+        xlab="RiskPerformance")
+table(heloc_No_NA$RiskPerformance)
+```
+A 51:47 split!  Nearly a 50:50 balance!
+
+
+```{r Histograms}
+# Deselect Bool Outcome/Response/Target variable
+no_risk_bool <- names(heloc_No_NA) != 'RiskPerformance'
+
+# heloc_imputed_full_set <- dplyr::as_tibble(heloc_imputed_full_set)
+heloc_ifs_names <- colnames(heloc_imputed_full_set[,no_risk_bool])
+
+par(mfrow=c(4,6))
+for (name in heloc_ifs_names){
+  p <- heloc_imputed_full_set %>%
+    ggplot( aes(x=heloc_imputed_full_set[,name], fill= RiskPerformance)) +
+      geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+      scale_fill_manual(values=c("#69b3a2", "#404080")) +
+      xlab(name) +
+      labs(fill="")
+  print(p)
+}
 ```
 
-```{r Data Histograms}
-# boxplot to view outliers
-boxplot(heloc_No_NA[, 1:23])
-# histograms to view predictor variable frequencies
-par(mfrow=c(3,4))
-Hmisc::hist.data.frame(heloc_No_NA[,1:23])
-``` 
+```{r BoxPlots}
+for (name in heloc_ifs_names){
+  # boxplot to view outliers
+  p <- ggplot(heloc_imputed_full_set,
+              aes(x=name,
+                  y=RiskPerformance,
+                  color=RiskPerformance)) +
+          geom_boxplot()
+  print(p)
+}
+```
 
 ```{r Imputation}
 # create training indices
 set.seed(3)
-heloc_training <- createDataPartition(heloc_No_NA$RiskPerformance, p=0.8, list=FALSE)
+heloc_training <- caret::createDataPartition(heloc_No_NA$RiskPerformance,
+                                             p=0.8,
+                                             list=FALSE)
 
 # training/set sets
 heloc_train <- heloc_No_NA[heloc_training, ]
 heloc_test <- heloc_No_NA[-heloc_training, ]
 
 # knn imputation
-heloc_impute <- preProcess(heloc_train, method = 'knnImpute')
-heloc_train <- predict(heloc_impute, newdata=heloc_train)
-heloc_test <- predict(heloc_impute, newdata=heloc_test)
+heloc_impute <- caret::preProcess(heloc_train,
+                                  method = 'knnImpute')
+
+heloc_train <- stats::predict(heloc_impute,
+                              newdata=heloc_train)
+
+heloc_test <- stats::predict(heloc_impute,
+                             newdata=heloc_test)
 
 # remove highly correlated predictors
-high_corr <- findCorrelation(cor(heloc_train[, -24]), 0.85)
+high_corr <- caret::findCorrelation(stats::cor(heloc_train[, -24]),
+                                    0.85)
 
+# removal of high cor predictors
 heloc_train <- heloc_train[, -(high_corr)]
 heloc_test <- heloc_test[, -(high_corr)]
 names(heloc_test[high_corr])
 ```
-
+We keep the heloc_train/test dataframes for formula based functions.
 ```{r train/test split}
-# Deselect Bool Outcome/Response/Target variable
-bool <- names(heloc_train) != 'RiskPerformance'
+no_risk_bool <- names(heloc_train) != 'RiskPerformance'
 
 # x = predictors
-heloc_train_x <- heloc_train[,bool]
-heloc_test_x <- heloc_test[,bool]
+heloc_train_x <- heloc_train[,no_risk_bool]
+heloc_test_x <- heloc_test[,no_risk_bool]
 
 # y = response/target
 heloc_train_y <- heloc_train[,'RiskPerformance']
@@ -125,168 +179,336 @@ heloc_test_y <- heloc_test[,'RiskPerformance']
 ```
 
 ```{r train control setup}
-control <- trainControl(method="cv",
-                        classProbs=TRUE,
-                        savePredictions=TRUE,
-                        summaryFunction=twoClassSummary)
+control <- caret::trainControl(method="cv",
+                               classProbs=TRUE,
+                               savePredictions=TRUE,
+                               summaryFunction=twoClassSummary)
 ```
-
-
 
 # Models
+With the following models, we are trying to maximize the SPECIFICITY of the models to prevent any non-qualified loanees being presented with a HELOC loan.
 
-## Logistic Regression
 
-```{r logistic regression}
-set.seed(100)
-logregModel <- train(x=heloc_train_x, y=heloc_train_y, method="glm", metric="ROC", trControl=control)
+Specificity is defined as:
+  "The specificity is defined as the rate that nonevent samples are predicted as nonevents" (Kuhn & Johnson, 2013)
 
-testResults <- data.frame(obs=heloc_test_y,
-                          logregModel=predict(logregModel, heloc_test_x))
+```{r Custom Functions}
+bestIndex <- function(model){
+  # returns top ROC value and surrounding indices from model
+  highest_score <- max(model$results$ROC)
 
-logregModel
+  # get row index and convert to type Int
+  best_index <- rownames(model$results[model$results$ROC ==highest_score,])
+  best_index <- as.integer(best_index)
+
+  return(best_index)
+}
+
+modelScoreBoard <- function(testResults){
+  # feed in testResults dataframe and outcomes a model scoreboard!
+  scoreboard <- data.frame()
+
+  bool <- names(testResults) != 'obs'
+  col_names <- colnames(testResults[,bool])
+  
+  for (colname in col_names){
+    
+    testResults.model <- testResults[,colname]
+    cf <- caret::confusionMatrix(testResults.model,
+                                 as.factor(testResults$obs),
+                                 positive="Good")
+    
+    # gather testResults
+    acc <- data.frame(metric=cf$overall[1])
+    # gather Precision, Sensitivity, Specificity, & F1
+    metrics <- list(cf$byClass[c(5,1,2,7)])
+    metrics <- data.frame(Metrics=metrics)
+    names(metrics) <- 'metric'
+    # gather all metrics in 1 df
+    metrics <- rbind(acc,metrics)
+    names(metrics) <- colname
+    
+    metrics <- t(metrics)
+    scoreboard <- rbind(scoreboard, metrics)
+  }
+  return(scoreboard)
+}
 ```
-```{r logistic regression coeffs}
-logregModel$finalModel$coefficients
-```
 
-```{r logistic regression confusion matrix}
-confusionMatrix(testResults$logregModel,
-                as.factor(testResults$obs), positive="Good")
-```
-
-```{r logistic regression variable importance}
-plot(varImp(logregModel, scale=FALSE), top=20)
-varImp(logregModel, scale=FALSE)
-```
-
-## LDA
+## Discriminant Classification Models
+### LDA
 ```{r LDA}
 set.seed(100)
-ldaModel <- train(x=heloc_train_x,
-                   y=heloc_train_y,
-                   method="lda",
-                   metric="ROC",
-                   trControl=control)
-ldaModel
+lda_model <- caret::train(x=heloc_train_x,
+                          y=heloc_train_y,
+                          method="lda",
+                          metric="ROC",
+                          trControl=control)
+lda_model
 ```
 
 ```{r LDA Confusion Matrix}
-testResults$ldaModel <- predict(ldaModel, heloc_test_x)
+lda_predictions <- stats::predict(lda_model, heloc_test_x)
+
+# create dataframe to store
+testResults <- data.frame(obs=heloc_test_y,
+                          lda_model=lda_predictions)
+
 # confusion matrix
-confusionMatrix(testResults$ldaModel,
-                as.factor(testResults$obs), positive="Good")
+caret::confusionMatrix(testResults$lda_model,
+                       as.factor(testResults$obs),
+                       positive="Good")
 ```
 
-## Penalized Logistic Regression
+
+### Logistic Regression
+```{r logistic regression}
+set.seed(100)
+logreg_model <- caret::train(x=heloc_train_x,
+                             y=heloc_train_y,
+                             method="glm",
+                             metric="ROC",
+                             trControl=control)
+
+testResults$log_reg_model <- stats::predict(logreg_model, heloc_test_x)
+
+logreg_model
+```
+
+```{r logistic regression coeffs}
+logreg_model$finalModel$coefficients
+```
+
+```{r logistic regression confusion matrix}
+caret::confusionMatrix(testResults$log_reg_model,
+                       as.factor(testResults$obs),
+                       positive="Good")
+```
+
+```{r logistic regression variable importance}
+lr_varImp <- caret::varImp(logreg_model, scale=FALSE)
+plot(lr_varImp, top=20)
+lr_varImp
+```
+
+### Penalized Logistic Regression
 ```{r penalized logistic regression}
 set.seed(100)
 glmnGrid <- expand.grid(alpha=c(0, 0.1, 0.2, 0.4, 0.6, 0.8, 1),
                         lambda=seq(0.01, 0.2, length=5))
 
-logregPenalizedModel <- train(x=heloc_train_x,
-                                y=heloc_train_y,
-                                method="glmnet",
-                                metric="ROC",
-                                tuneGrid=glmnGrid,
-                                trControl=control)
-logregPenalizedModel
+logreg_penalized_model <- caret::train(x=heloc_train_x,
+                                       y=heloc_train_y,
+                                       method="glmnet",
+                                       metric="ROC",
+                                       tuneGrid=glmnGrid,
+                                       trControl=control)
+
+# bestIndex(logreg_penalized_model)
+logreg_penalized_model$results[3:7,1:5]
 ```
+Based on the best ROC, has the best specificity, our main metric.  This enables us to insure that we only accept best qualified candidates, thus reducing the risk of a loanee defaulting on a $100,000 loan.
 
 ```{r penalized LR Confusion Matrix}
-testResults$logregPenalizedModel <- predict(logregPenalizedModel,
-                                              heloc_test_x)
+# Utilizing Best Model
+testResults$logreg_penalized_model <- stats::predict(logreg_penalized_model,
+                                                     heloc_test_x)
 # confusion matrix
-confusionMatrix(testResults$logregPenalizedModel,
-                as.factor(testResults$obs), positive="Good")
-```
-## Classification Trees
-
-```{r rpart model build}
-rpartModel <- rpart::rpart(RiskPerformance ~ ., data=heloc_train)
-testResults$rpart <- predict(rpartModel, heloc_test_x)
-
-rpartModel
+caret::confusionMatrix(testResults$logreg_penalized_model,
+                       as.factor(testResults$obs),
+                       positive="Good")
 ```
 
-# ```{r rpart confusion matrix}
-# confusionMatrix(testResults$rpart,
-#                 as.factor(testResults$obs), positive="Good")
-# ```
 
 
-<!-- ```{r} -->
-<!--  predict(rpart_model, heloc_test_x) -->
-<!-- ``` -->
 
+## Nonlinear Classification Models
 
+### Flexibble Discriminant Analysis
+```{r Flexible Discriminant GridSearch}
+set.seed(100)
+fdaGrid <- expand.grid(degree=c(1,2),
+                       nprune=seq(14, 20, 1))
+
+set.seed(100)
+fdaModel <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         method = "fda",
+                         metric = "ROC",
+                         trControl=control,
+                         tuneGrid=fdaGrid)
+# bestIndex(fdaModel)
+fdaModel$results[1:18,1:5]
+```
+
+As we see, the best is that of nprune 16 with a specificity of 72.15% (index = 15).
+```{r Flexible Discriminant Tuning}
+fdaGrid <- expand.grid(degree=1,
+                       nprune=16)
+
+set.seed(100)
+fdaModel <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         method = "fda",
+                         metric = "ROC",
+                         trControl=control,
+                         tuneGrid=fdaGrid)
+```
+
+```{r FDA Confusion Matrix}
+testResults$fda_model <- predict(fdaModel,
+                                 heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$fda_model,
+                as.factor(testResults$obs),
+                positive="Good")
+```
+
+### Neural Network
 ```{r neural network}
 set.seed(100)
-nnetGrid <- expand.grid(size = 1:3, decay = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 2))
-nnetModel <- train(x = heloc_train_x,
-                    y = heloc_train_y,
-                    method = "nnet",
-                    tuneGrid = nnetGrid,
-                    metric = "ROC",
-                    trace = FALSE,
-                    maxit = 2000,
-                    trControl = control)
-nnetModel
+nnetGrid <- expand.grid(size = 1:2,
+                        decay = c(0, 0.1, 0.25, 0.5, 0.75, 1))
+
+nnetModel <- caret::train(x = heloc_train_x,
+                          y = heloc_train_y,
+                          method = "nnet",
+                          tuneGrid = nnetGrid,
+                          metric = "ROC",
+                          trace = FALSE,
+                          maxit = 2000,
+                          trControl = control)
+nnetModel$bestTune$results[1:6,1:5]
+```
+It appears that the model starts to over fit once the decay goes to 0.1.  The nnet model chose size=2 with decay of 2, with nearly identical ROC, Sensitivity, and Specificity scores and thus size 1 with decay 0 is our choice.
+
+```{r neural network tuning}
+set.seed(100)
+nnetGrid <- expand.grid(size = 1,
+                        decay = 0)
+
+nnetModel <- caret::train(x = heloc_train_x,
+                   y = heloc_train_y,
+                   method = "nnet",
+                   tuneGrid = nnetGrid,
+                   metric = "ROC",
+                   trace = FALSE,
+                   maxit = 2000,
+                   trControl = control)
 ```
 
 ```{r neural network Confusion Matrix}
-testResults$nnetModel <- predict(nnetModel,
+testResults$nnet_model <- predict(nnetModel,
                                   heloc_test_x)
 # confusion matrix
-confusionMatrix(testResults$nnetModel,
-                as.factor(testResults$obs), positive="Good")
+confusionMatrix(testResults$nnet_model,
+                as.factor(testResults$obs),
+                positive="Good")
 ```
 
 
+## Classification Trees
+
+### Boosted Tree
 ```{r Boosted Tree}
-gbmGrid <- expand.grid(interaction.depth = c(6),
-                       n.trees = 1000,
+gbmGrid <- expand.grid(interaction.depth = c(2,3),
+                       n.trees = c(1000,1500),
                        shrinkage = c(0.01, 0.1),
+                       n.minobsinnode = c(5,40))
+set.seed(100)
+gbmModel <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         method = "gbm",
+                         tuneGrid = gbmGrid,
+                         verbose = FALSE,
+                         metric = "ROC",
+                         trControl= control)
+gbmModel$results
+```
+
+```{r Boosted Tree Model Tuning}
+gbmGrid <- expand.grid(interaction.depth = 2,
+                       n.trees = 2000,
+                       shrinkage = 0.01,
                        n.minobsinnode = 5)
 set.seed(100)
-gbmModel <- train(x = heloc_train_x,
-                   y = heloc_train_y,
-                   method = "gbm",
-                   tuneGrid = gbmGrid,
-                   verbose = FALSE,
-                   metric = "ROC",
-                   trControl= control)
-gbmModel
+gbmModel <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         method = "gbm",
+                         tuneGrid = gbmGrid,
+                         verbose = FALSE,
+                         metric = "ROC",
+                         trControl= control)
 ```
-
 
 ```{r Boosted Tree Confusion Matrix}
-testResults$gbmModel <- predict(gbmModel,
+testResults$gbm_model <- predict(gbmModel,
                                  heloc_test_x)
 # confusion matrix
-confusionMatrix(testResults$gbmModel,
-                as.factor(testResults$obs), positive="Good")
+caret::confusionMatrix(testResults$gbm_model,
+                       as.factor(testResults$obs),
+                       positive="Good")
 ```
 
-```{r Flexible Discriminant}
+
+## CART
+```{r rpart model build}
 set.seed(100)
-fdaModel <- train(x = heloc_train_x,
-                   y = heloc_train_y,
-                   method = "fda",
-                   metric = "ROC",
-                   trControl=control)
-fdaModel
+rpart_grid <- expand.grid(cp=c(0.0005, 0.001250, 0.0015, 0.00175, 0.002))
+
+rpart_model <- caret::train(x=heloc_train_x,
+                            y=heloc_train_y,
+                            method="rpart",
+                            metric="ROC",
+                            trControl=control,
+                            tuneGrid = rpart_grid)
+
+testResults$rpart_model <- predict(rpart_model, heloc_test_x)
+
+rpart_model
+```
+As we see, specificity for this model is one of the worst out of all the models we have.
+```{r rpart model tuning}
+set.seed(100)
+rpart_grid <- expand.grid(cp=0.00175)
+
+rpart_model <- caret::train(x=heloc_train_x,
+                            y=heloc_train_y,
+                            method="rpart",
+                            metric="ROC",
+                            trControl=control,
+                            tuneGrid = rpart_grid)
+
+rpart_model
 ```
 
-```{r}
-testResults$fdaModel <- predict(fdaModel,
-                                 heloc_test_x)
-# confusion matrix
-confusionMatrix(testResults$fdaModel,
-                as.factor(testResults$obs), positive="Good")
+```{r rpart confusion matrix}
+testResults$rpart_model <- predict(rpart_model, heloc_test_x)
+
+caret::confusionMatrix(testResults$rpart_model,
+                       as.factor(testResults$obs),
+                       positive="Good")
+```
+## Random Forest
+```{r Random Forest Model}
+heloc_train$RiskPerformance <- as.factor(heloc_train$RiskPerformance)
+randomForest_model <- randomForest::randomForest(RiskPerformance ~ ., data=heloc_train)
+randomForest_model
+```
+
+```{r Random Forest confusion matrix}
+testResults$randomForest_model <- predict(randomForest_model, heloc_test_x)
+
+caret::confusionMatrix(testResults$randomForest_model,
+                       as.factor(testResults$obs),
+                       positive="Good")
 ```
 
 
-```{r}
-
+## Result Discussion
+```{r Discussion}
+modelScoreBoard(testResults)
 ```
+
+# REFERENCES:
+Kuhn, M., & Johnson, K. (2013). Applied Predictive Modeling. New York: Springer.
