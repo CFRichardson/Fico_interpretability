@@ -171,7 +171,6 @@ for (num_ in 1:length(heloc_ifs_names)){
       labs(fill="")
   plot_list[[num_]] <- p
 }
-do.call("gridExtra::grid.arrange", c(plot_list, ncol=2))
 ```
 
 ### BoxPlots
