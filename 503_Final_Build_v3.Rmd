@@ -403,7 +403,8 @@ PlotProf<-data.frame(percent_bad_thresh = c(10,20,30,40,50,60,70,80,90),
                                 sum(CF90$table*Costs*Prev)))
 
 ggplot(PlotProf, aes(y=profit, x=percent_bad_thresh)) + 
-    geom_point()
+    geom_point() +
+    geom_line()
 ```
 
 
