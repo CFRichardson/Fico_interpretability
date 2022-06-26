@@ -1,0 +1,726 @@
+---
+title: "ADS 503 Final Project"
+author: "Claire Phibbs, Christopher Richardson, Martin Zagari"
+date: '2022-06-17'
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r Library Setup, include=FALSE}
+library(caret)
+library(DataExplorer)
+library(dplyr)
+library(glmnet)
+library(ggplot2)
+library(lattice)
+library(kableExtra)
+library(knitr)
+library(MASS)
+library(pamr)
+library(pROC)
+library(RANN)
+library(randomForest)
+library(Rcpp)
+library(ROCR)
+library(tidyr)
+library(tidyverse)
+```
+
+# The Data
+Our target variable "Risk Performance" along with the first 13 predictor columns
+```{r Data view First 13 columms}
+file_loc <- '/Volumes/GoogleDrive/My Drive/503/Project 503/Fico Data/heloc_dataset_v1.csv'
+heloc <- read.csv(file_loc)
+
+# sort col names for readability purposes
+heloc <- heloc[ , order(names(heloc))]
+
+knitr::kable(heloc[1:4,c(24,1:13)]) %>%
+  kableExtra::kable_styling("striped", full_width = F) %>%
+  kableExtra::row_spec(0, angle = -90)
+```
+
+Predictor columns 14 to 23
+```{r Data view First rest columms}
+knitr::kable(heloc[1:4,c(24,14:23)]) %>%
+  kableExtra::kable_styling("striped", full_width = F) %>%
+  kableExtra::row_spec(0, angle = -90)
+```
+
+# Data Pre-Processing
+```{r DF Introduction, fig.height=4}
+DataExplorer::plot_intro(heloc)
+```
+
+```{r pre-processing, fig.height=4}
+# -9 = No Credit History
+# -8 and -7 = No recent activity
+heloc[heloc == -9] <- NA
+heloc[heloc == -8] <- NA
+heloc[heloc == -7] <- NA
+DataExplorer::plot_intro(heloc)
+```
+It appears that roughly 76.1% of our data had one or more predictors had a -9,-8,-7.
+
+```{r ALL NULL removal, fig.height=4}
+# removing missing values from rows that span across all columns (588 values)
+heloc_No_NA <- heloc %>% dplyr::filter_at(vars(-RiskPerformance),
+                                          any_vars(!is.na(.)))
+DataExplorer::plot_intro(heloc_No_NA)
+```
+
+
+```{r Outcome Table, fig.height=5}
+# bar plot of response variable; RiskPerformance
+barplot(table(heloc_No_NA$RiskPerformance),
+        main="Plot of Response Variable: RiskPerformance",
+        xlab="RiskPerformance")
+table(heloc_No_NA$RiskPerformance)
+```
+A 51:47 split!  Nearly a 50:50 balance!
+
+```{r Imputation}
+# create training indices
+set.seed(3)
+heloc_training <- caret::createDataPartition(heloc_No_NA$RiskPerformance,
+                                             p=0.8,
+                                             list=FALSE)
+
+# training/set sets
+heloc_train <- heloc_No_NA[heloc_training, ]
+heloc_test <- heloc_No_NA[-heloc_training, ]
+
+# knn imputation
+heloc_impute <- caret::preProcess(heloc_train,
+                                  method = 'knnImpute')
+
+heloc_train <- stats::predict(heloc_impute,
+                              newdata=heloc_train)
+
+heloc_test <- stats::predict(heloc_impute,
+                             newdata=heloc_test)
+
+# remove highly correlated predictors
+high_corr <- caret::findCorrelation(stats::cor(heloc_train[, -24]),
+                                    0.85)
+
+# removal of high cor predictors
+heloc_train <- heloc_train[, -(high_corr)]
+heloc_test <- heloc_test[, -(high_corr)]
+names(heloc_test[high_corr])
+```
+We keep the heloc_train/test dataframes for formula based functions.
+```{r train/test split}
+no_risk_bool <- names(heloc_train) != 'RiskPerformance'
+
+# x = predictors
+heloc_train_x <- heloc_train[,no_risk_bool]
+heloc_test_x <- heloc_test[,no_risk_bool]
+
+# y = response/target
+heloc_train_y <- heloc_train[,'RiskPerformance']
+heloc_test_y <- heloc_test[,'RiskPerformance']
+```
+
+## EDA
+
+#### Correlation Plot
+```{r Corr Plot, eval=FALSE}
+# correlations
+png(file="Corr_Plot.png")
+# correlations
+corrplot::corrplot(stats::cor(heloc_train),
+                   number.cex = 0.5,
+                   tl.cex = 0.8)
+dev.off()
+```
+
+<div style="width:750px; height:750px">
+![](/Volumes/GoogleDrive/My Drive/503/Project 503/Corr_Plot.png)
+</div>
+
+### Histograms
+```{r Histograms Overall }
+# boxplot to view outliers 
+boxplot(heloc[, 1:23])
+# histograms to view predictor variable frequencies 
+par(mfrow=c(3,4))
+Hmisc::hist.data.frame(heloc[,1:23])
+```
+
+```{r Histograms by Outcome }
+# Deselect Bool Outcome/Response/Target variable
+no_risk_bool <- names(heloc_train) != 'RiskPerformance'
+
+# heloc_imputed_full_set <- dplyr::as_tibble(heloc_imputed_full_set)
+heloc_ifs_names <- colnames(heloc_train[,no_risk_bool])
+
+par(mfrow=c(4,6))
+for (name in heloc_ifs_names){
+  p <- heloc_train %>%
+    ggplot( aes(x=heloc_train[,name], fill=RiskPerformance)) +
+      geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+      scale_fill_manual(values=c("#69b3a2", "#404080")) +
+      xlab(name) +
+      labs(fill="")
+  print(p)
+}
+```
+
+### BoxPlots
+```{r BoxPlots Overall}
+# bar plot of response variable; RiskPerformance
+barplot(table(heloc$RiskPerformance), main="Plot of Response Variable: RiskPerformance", xlab="RiskPerformance")
+```
+
+```{r BoxPlots by group}
+par(mfrow=c(4,6))
+for (name in heloc_ifs_names){
+  # boxplot to view outliers
+  p <- ggplot(heloc_train,
+              aes(x=name,
+                  y=RiskPerformance,
+                  color=RiskPerformance)) +
+          geom_boxplot()
+  print(p)
+}
+```
+
+
+```{r train control setup}
+control <- caret::trainControl(method="cv",
+                               classProbs=TRUE,
+                               savePredictions=TRUE,
+                               summaryFunction=twoClassSummary)
+```
+
+# Models
+With the following models, we are trying to maximize the SPECIFICITY of the models to prevent any non-qualified loanees being presented with a HELOC loan.
+
+
+Specificity is defined as:
+  "The specificity is defined as the rate that nonevent samples are predicted as nonevents" (Kuhn & Johnson, 2013)
+
+```{r Custom Functions}
+bestIndex <- function(model){
+  # returns top ROC value and surrounding indices from model
+  highest_score <- max(model$results$ROC)
+
+  # get row index and convert to type Int
+  best_index <- rownames(model$results[model$results$ROC == highest_score,])
+  best_index <- as.integer(best_index)
+
+  return(best_index)
+}
+
+confusionMatrix <- function(testResults.model){
+  caret::confusionMatrix(testResults.model,
+                       as.factor(testResults$obs),
+                       positive="Good")
+}
+
+modelScoreBoard <- function(testResults){
+  # feed in testResults dataframe and out comes a model scoreboard!
+  scoreboard <- data.frame()
+
+  bool <- names(testResults) != 'obs'
+  col_names <- colnames(testResults[,bool])
+  
+  for (colname in col_names){
+    
+    testResults.model <- testResults[,colname]
+    cf <- caret::confusionMatrix(testResults.model,
+                                 as.factor(testResults$obs),
+                                 positive="Good")
+    
+    # gather testResults
+    acc <- data.frame(metric=cf$overall[1])
+    # gather Precision, Sensitivity, Specificity, & F1
+    metrics <- list(cf$byClass[c(5,1,2,7)])
+    metrics <- data.frame(Metrics=metrics)
+    names(metrics) <- 'metric'
+    # gather all metrics in 1 df
+    metrics <- rbind(acc,metrics)
+    names(metrics) <- colname
+    
+    metrics <- t(metrics)
+    scoreboard <- rbind(scoreboard, metrics)
+  }
+  return(scoreboard)
+}
+
+# helper function for roc 
+roc_build <- function(model) {
+  THE_ROC <- roc(response = model$pred$obs,
+                 predictor = model$pred$Bad,
+                 levels = rev(levels(model$pred$obs)))
+  return(THE_ROC)
+}
+```
+
+## Discriminant Classification Models
+### LDA
+```{r LDA}
+set.seed(100)
+lda_model <- caret::train(x=heloc_train_x,
+                          y=heloc_train_y,
+                          method="lda",
+                          metric="ROC",
+                          trControl=control)
+
+lda_modelRoc <- roc_build(lda_model)
+lda_model
+```
+
+```{r LDA Confusion Matrix}
+lda_predictions <- stats::predict(lda_model, heloc_test_x)
+
+# create dataframe to store
+testResults <- data.frame(obs=heloc_test_y,
+                          lda_model=lda_predictions)
+
+# confusion matrix
+confusionMatrix(testResults$lda_model)
+```
+
+
+### Logistic Regression
+```{r logistic regression}
+set.seed(100)
+logreg_model <- caret::train(x=heloc_train_x,
+                             y=heloc_train_y,
+                             method="glm",
+                             metric="ROC",
+                             trControl=control)
+
+testResults$log_reg_model <- stats::predict(logreg_model, heloc_test_x)
+logreg_modelRoc <- roc_build(logreg_model)
+logreg_model
+```
+
+```{r logistic regression coeffs}
+logreg_model$finalModel$coefficients
+```
+
+```{r logistic regression confusion matrix}
+confusionMatrix(testResults$log_reg_model)
+```
+
+```{r logistic regression variable importance}
+lr_varImp <- caret::varImp(logreg_model, scale=FALSE)
+plot(lr_varImp, top=20)
+```
+#### Cost Matrix Threshold Analysis
+```{r LR cost matrix threshold anaylsis}
+#get raw probs from model
+predictions <- predict(logreg_model, heloc_test_x, type = 'prob')
+predictions$OBS <- as.factor(heloc_test$RiskPerformance)
+predictions <- predictions %>%
+  mutate(lr10 = as.factor(if_else(Bad > 0.1, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr20 = as.factor(if_else(Bad > 0.2, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr30 = as.factor(if_else(Bad > 0.3, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr40 = as.factor(if_else(Bad > 0.4, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr50 = as.factor(if_else(Bad > 0.5, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr60 = as.factor(if_else(Bad > 0.6, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr70 = as.factor(if_else(Bad > 0.7, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr80 = as.factor(if_else(Bad > 0.8, 'Bad', 'Good')))
+predictions <- predictions %>% 
+  mutate(lr90 = as.factor(if_else(Bad > 0.9, 'Bad', 'Good')))
+
+# cf function 
+cost_confusionMatrix <- function(prediction.rate){
+  cm <- caret::confusionMatrix(prediction.rate,
+                               predictions$OBS,
+                               positive = "Bad")
+  return(cm)
+}
+
+CF10 <- cost_confusionMatrix(predictions$lr10)
+CF20 <- cost_confusionMatrix(predictions$lr20)
+CF30 <- cost_confusionMatrix(predictions$lr30)
+CF40 <- cost_confusionMatrix(predictions$lr40)
+CF50 <- cost_confusionMatrix(predictions$lr50)
+CF60 <- cost_confusionMatrix(predictions$lr60)
+CF70 <- cost_confusionMatrix(predictions$lr70)
+CF80 <- cost_confusionMatrix(predictions$lr80)
+CF90 <- cost_confusionMatrix(predictions$lr90)
+
+Costs = matrix(c(0,-1000*.85,-60,60), ncol=2, nrow=2)
+
+Prev = matrix(c(9.6/50,9.6/50,2,2), ncol=2, nrow=2)
+
+CF10$table
+sum(CF10$table*Costs*Prev)
+CF20$table
+sum(CF20$table*Costs*Prev)
+CF30$table
+sum(CF30$table*Costs*Prev)
+CF40$table
+sum(CF40$table*Costs*Prev)
+CF50$table
+sum(CF50$table*Costs*Prev)
+CF60$table
+sum(CF60$table*Costs*Prev)
+CF70$table
+sum(CF70$table*Costs*Prev)
+CF80$table
+sum(CF80$table*Costs*Prev)
+CF90$table
+sum(CF90$table*Costs*Prev)
+
+PlotProf<-data.frame(percent_bad_thresh = c(10,20,30,40,50,60,70,80,90),
+                     profit = c(sum(CF10$table*Costs*Prev),
+                                sum(CF20$table*Costs*Prev),
+                                sum(CF30$table*Costs*Prev),
+                                sum(CF40$table*Costs*Prev),
+                                sum(CF50$table*Costs*Prev),
+                                sum(CF60$table*Costs*Prev),
+                                sum(CF70$table*Costs*Prev),
+                                sum(CF80$table*Costs*Prev),
+                                sum(CF90$table*Costs*Prev)))
+
+ggplot(PlotProf, aes(y=profit, x=percent_bad_thresh)) + 
+    geom_point()
+```
+
+
+
+### Penalized Logistic Regression
+```{r penalized logistic regression}
+set.seed(100)
+glmnGrid <- expand.grid(alpha=c(0, 0.1, 0.2, 0.4, 0.6, 0.8, 1),
+                        lambda=seq(0.01, 0.2, length=5))
+
+logreg_penalized_model <- caret::train(x=heloc_train_x,
+                                       y=heloc_train_y,
+                                       method="glmnet",
+                                       metric="ROC",
+                                       tuneGrid=glmnGrid,
+                                       trControl=control)
+
+# bestIndex(logreg_penalized_model)
+logreg_penalized_model$results[3:7,1:5]
+
+logreg_penalized_modelRoc <- roc_build(logreg_penalized_model)
+```
+Based on the best ROC, has the best specificity, our main metric.  This enables us to insure that we only accept best qualified candidates, thus reducing the risk of a loanee defaulting on a $100,000 loan.
+
+```{r penalized LR Confusion Matrix}
+# Utilizing Best Model
+testResults$logreg_penalized_model <- stats::predict(logreg_penalized_model,
+                                                     heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$logreg_penalized_model)
+```
+
+
+
+
+## Nonlinear Classification Models
+
+### Flexibble Discriminant Analysis
+```{r Flexible Discriminant GridSearch}
+# set.seed(100)
+# fdaGrid <- expand.grid(degree=c(1,2),
+#                        nprune=seq(14, 20, 1))
+# 
+# set.seed(100)
+# fdaModel <- caret::train(x = heloc_train_x,
+#                          y = heloc_train_y,
+#                          method = "fda",
+#                          metric = "ROC",
+#                          trControl=control,
+#                          tuneGrid=fdaGrid)
+# # bestIndex(fdaModel)
+# fdaModel$results[1:18,1:5]
+```
+
+As we see, the best is that of nprune 16 with a specificity of 72.15% (index = 15).
+```{r Flexible Discriminant Tuning}
+fdaGrid <- expand.grid(degree=1,
+                       nprune=16)
+
+set.seed(100)
+fdaModel <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         method = "fda",
+                         metric = "ROC",
+                         trControl=control,
+                         tuneGrid=fdaGrid)
+
+fda_modelRoc <- roc_build(fdaModel)
+```
+
+```{r FDA Confusion Matrix}
+testResults$fda_model <- predict(fdaModel,
+                                 heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$fda_model)
+```
+
+### Neural Network
+```{r neural network GridSearch}
+# set.seed(100)
+# nnetGrid <- expand.grid(size = 1:2,
+#                         decay = c(0, 0.1, 0.25, 0.5, 0.75, 1))
+# 
+# nnetModel <- caret::train(x = heloc_train_x,
+#                           y = heloc_train_y,
+#                           method = "nnet",
+#                           tuneGrid = nnetGrid,
+#                           metric = "ROC",
+#                           trace = FALSE,
+#                           maxit = 2000,
+#                           trControl = control)
+# nnetModel$bestTune$results[1:6,1:5]
+```
+It appears that the model starts to over fit once the decay goes to 0.1.  The nnet model chose size=2 with decay of 2, with nearly identical ROC, Sensitivity, and Specificity scores and thus size 1 with decay 0 is our choice.
+
+```{r neural network tuning}
+set.seed(100)
+nnetGrid <- expand.grid(size = 1,
+                        decay = 0)
+
+nnetModel <- caret::train(x = heloc_train_x,
+                   y = heloc_train_y,
+                   method = "nnet",
+                   tuneGrid = nnetGrid,
+                   metric = "ROC",
+                   trace = FALSE,
+                   maxit = 2000,
+                   trControl = control)
+
+nnet_modelRoc <- roc_build(nnetModel)
+```
+
+```{r neural network Confusion Matrix}
+testResults$nnet_model <- predict(nnetModel,
+                                  heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$nnet_model)
+```
+
+
+## Classification Trees
+
+### Boosted Tree
+```{r GBM Boosted Tree GridSearch}
+# gbmGrid <- expand.grid(interaction.depth =  c(2,3),
+#                        n.trees = c(1000,2000,3000,4000), #default val = 1000
+#                        shrinkage = c(0.01, 0.1),
+#                        n.minobsinnode = c(5,10)) # default val = 10
+# set.seed(100)
+# gbmModel <- caret::train(x = heloc_train_x,
+#                          y = heloc_train_y,
+#                          method = "gbm",
+#                          tuneGrid = gbmGrid,
+#                          verbose = FALSE,
+#                          metric = "ROC",
+#                          trControl= control)
+# gbmModel$results
+```
+
+```{r Boosted Tree Model Tuning}
+gbmGrid <- expand.grid(interaction.depth = 2,
+                       n.trees = 1000,
+                       shrinkage = 0.01,
+                       n.minobsinnode = 5)
+set.seed(100)
+gbmModel <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         method = "gbm",
+                         tuneGrid = gbmGrid,
+                         verbose = FALSE,
+                         metric = "ROC",
+                         trControl= control)
+
+gbm_modelRoc <- roc_build(gbmModel)
+```
+
+```{r Boosted Tree Confusion Matrix}
+testResults$gbm_model <- predict(gbmModel,
+                                 heloc_test_x)
+# confusion matrix
+confusionMatrix(testResults$gbm_model)
+```
+#### GBM with monotonic constraints
+```{r GBM_Mono GridSearch}
+# gbmGrid <- expand.grid(interaction.depth = c(2,3),
+#                        n.trees = c(1000,2000),
+#                        shrinkage = c(0.01, 0.1),
+#                        n.minobsinnode = c(5,10))
+# set.seed(100)
+# gbmMono_model <- caret::train(x = heloc_train_x,
+#                               y = heloc_train_y,
+#                               method = "gbm",
+#                               var.monotone = c(-1,-1,-1,-1,-1,-1,-1,-1,
+#                                                1,1,1,1,0,0,-1,0,-1,1,
+#                                                0,-1,1),
+#                               tuneGrid = gbmGrid,
+#                               verbose = FALSE,
+#                               metric = "ROC",
+#                               trControl= control)
+# gbmMono_model$results
+```
+
+```{r GBM_Mono Model Tune}
+gbmGrid <- expand.grid(interaction.depth = 2,
+                       n.trees = 1000,
+                       shrinkage = 0.01,
+                       n.minobsinnode = 5)
+set.seed(100)
+gbmMono_model <- caret::train(x = heloc_train_x,
+                         y = heloc_train_y,
+                         var.monotone = c(-1,-1,-1,-1,-1,-1,-1,-1,
+                                          1,1,1,1,0,0,-1,0,-1,1,
+                                          0,-1,1),
+                         method = "gbm",
+                         tuneGrid = gbmGrid,
+                         verbose = FALSE,
+                         metric = "ROC",
+                         trControl= control)
+
+gbmMono_modelRoc <- roc_build(gbmMono_model)
+```
+
+```{r GBM_Mono Confusion Matrix}
+testResults$gbmMono_model <- predict(gbmMono_model,
+                                     heloc_test_x)
+confusionMatrix(testResults$gbmMono_model)
+```
+
+
+## CART
+```{r rpart model build GridSearch}
+# set.seed(100)
+# rpart_grid <- expand.grid(cp=c(0.0005, 0.001250, 0.0015, 0.00175, 0.002))
+# 
+# rpart_model <- caret::train(x=heloc_train_x,
+#                             y=heloc_train_y,
+#                             method="rpart",
+#                             metric="ROC",
+#                             trControl=control,
+#                             tuneGrid = rpart_grid)
+# 
+# testResults$rpart_model <- predict(rpart_model, heloc_test_x)
+# 
+# rpart_model
+```
+
+As we see, specificity for this model is one of the worst out of all the models we have.
+
+```{r rpart model tuning}
+set.seed(100)
+rpart_grid <- expand.grid(cp=0.00175)
+
+rpart_model <- caret::train(x=heloc_train_x,
+                            y=heloc_train_y,
+                            method="rpart",
+                            metric="ROC",
+                            trControl=control,
+                            tuneGrid = rpart_grid)
+
+rpart_modelRoc <- roc_build(rpart_model)
+rpart_model
+```
+
+```{r rpart confusion matrix}
+testResults$rpart_model <- predict(rpart_model, heloc_test_x)
+
+confusionMatrix(testResults$rpart_model)
+```
+## Random Forest
+
+```{r Random Forest GridSearch}
+# set.seed(100)
+# rf_grid <- expand.grid(mtry=c(5,10,15))
+# 
+# randomForest_model <- caret::train(x=heloc_train_x,
+#                           y=heloc_train_y,
+#                           method="rf",
+#                           metric="ROC",
+#                           trControl=control,
+#                           tuneGrid = rf_grid)
+# 
+# randomForest_model
+```
+
+```{r Random Forest Model Tune}
+set.seed(100)
+rf_grid <- expand.grid(mtry=5)
+
+randomForest_model <- caret::train(x=heloc_train_x,
+                                   y=heloc_train_y,
+                                   method="rf",
+                                   metric="ROC",
+                                   trControl=control,
+                                   tuneGrid = rf_grid)
+
+randomForest_modelRoc <- roc_build(randomForest_model)
+randomForest_model
+```
+
+```{r Random Forest confusion matrix}
+testResults$randomForest_model <- predict(randomForest_model, heloc_test_x)
+
+confusionMatrix(testResults$randomForest_model)
+```
+
+
+## Result Discussion
+
+```{r ROC COMPARISON}
+plot(lda_modelRoc, type='s', col='antiquewhite4', legacy.axes=TRUE)
+plot(logreg_modelRoc, type='s', col='aquamarine3', legacy.axes=TRUE, add=TRUE)
+plot(logreg_penalized_modelRoc, type='s', col='blue', legacy.axes=TRUE, add=TRUE)
+plot(fda_modelRoc, type='s', col='blueviolet', legacy.axes=TRUE, add=TRUE)
+plot(nnet_modelRoc, type='s', col='brown', legacy.axes=TRUE, add=TRUE)
+plot(gbm_modelRoc, type='s', col='cadetblue', legacy.axes=TRUE, add=TRUE)
+plot(gbmMono_modelRoc, type='s', col='red', legacy.axes=TRUE, add=TRUE)
+plot(rpart_modelRoc, type='s', col='chartreuse', legacy.axes=TRUE, add=TRUE)
+plot(randomForest_modelRoc, type='s', col='cornflowerblue', legacy.axes=TRUE, add=TRUE)
+
+legend_ <- c('LDA', 'LR', 'Penalized LR','FDA', 'NNET','GBM','GBM+mono', 'RPART','RandomForest')
+colors_ <-c('antiquewhite4',
+            'aquamarine3',
+            'blue',
+            'blueviolet',
+            'brown',
+            'cadetblue',
+            'red',
+            'chartreuse',
+            'cornflowerblue')
+legend('bottomright', legend=legend_,
+       col=colors_, lwd=2)
+title(main = 'Compare ROC curves from different models', outer = TRUE)
+```
+
+```{r METRIC Comparison}
+# gather all model AUCs in 1 list
+aucs <- c(lda_modelRoc$auc,
+          logreg_modelRoc$auc,
+          logreg_penalized_modelRoc$auc,
+          fda_modelRoc$auc,
+          nnet_modelRoc$auc,
+          gbm_modelRoc$auc,
+          gbmMono_modelRoc$auc,
+          rpart_modelRoc$auc,
+          randomForest_modelRoc$auc)
+
+scoreboard <- modelScoreBoard(testResults)
+# add AUC list as a column
+scoreboard$AUC <- aucs
+scoreboard
+```
+
+
+# REFERENCES:
+Kuhn, M., & Johnson, K. (2013). Applied Predictive Modeling. New York: Springer.
