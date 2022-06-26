@@ -142,12 +142,16 @@ dev.off()
 <div style="width:750px; height:750px">
 ![](/Volumes/GoogleDrive/My Drive/503/Project 503/Corr_Plot.png)
 </div>
+### Outcome Bar Plot
+```{r Risk Performance Bar Graph}
+# bar plot of response variable; RiskPerformance
+barplot(table(heloc$RiskPerformance), main="Plot of Response Variable: RiskPerformance", xlab="RiskPerformance")
+```
 
 ### Histograms
+
 #### Overall
 ```{r Histograms Overall }
-# boxplot to view outliers 
-boxplot(heloc[, 1:23])
 # histograms to view predictor variable frequencies 
 par(mfrow=c(3,4))
 Hmisc::hist.data.frame(heloc[,1:23])
@@ -176,20 +180,22 @@ for (name in heloc_ifs_names){
 ### BoxPlots
 
 #### Overall
-
-```{r BoxPlots Overall}
-# bar plot of response variable; RiskPerformance
-barplot(table(heloc$RiskPerformance), main="Plot of Response Variable: RiskPerformance", xlab="RiskPerformance")
+```{r BoxPlot Combined}
+# boxplot to view outliers 
+boxplot(heloc[, 1:23])
 ```
+
 
 #### By Group
 
 ```{r BoxPlots by group}
+
 for (name in heloc_ifs_names){
   # boxplot to view outliers
   p <- heloc_train %>%
           ggplot( aes(x=heloc_train[,name], y=name, fill=RiskPerformance)) +
-          geom_boxplot()
+          geom_boxplot() +
+          xlab(name)
   print(p) 
 }
 ```
