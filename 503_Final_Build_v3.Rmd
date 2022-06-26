@@ -160,16 +160,16 @@ no_risk_bool <- names(heloc_train) != 'RiskPerformance'
 # heloc_imputed_full_set <- dplyr::as_tibble(heloc_imputed_full_set)
 heloc_ifs_names <- colnames(heloc_train[,no_risk_bool])
 
-# empty list to gather all plots 
+# empty list to gather all
 plot_list <- list()
-for (num_ in 1:length(heloc_ifs_names)){
+for (name in heloc_ifs_names){
   p <- heloc_train %>%
-    ggplot( aes(x=heloc_train[,num_], fill=RiskPerformance)) +
+    ggplot( aes(x=heloc_train[,name], fill=RiskPerformance)) +
       geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
       scale_fill_manual(values=c("#69b3a2", "#404080")) +
-      xlab(heloc_ifs_names[num_]) +
+      xlab(name) +
       labs(fill="")
-  plot_list[[num_]] <- p
+  print(p)
 }
 ```
 
@@ -185,17 +185,15 @@ barplot(table(heloc$RiskPerformance), main="Plot of Response Variable: RiskPerfo
 #### By Group
 
 ```{r BoxPlots by group}
-par(mfrow=c(4,6))
 for (name in heloc_ifs_names){
   # boxplot to view outliers
-  p <- ggplot(heloc_train,
-              aes(x=name,
-                  y=RiskPerformance,
-                  color=RiskPerformance)) +
+  p <- heloc_train %>%
+          ggplot( aes(x=heloc_train[,name], y=name, fill=RiskPerformance)) +
           geom_boxplot()
-  print(p)
+  print(p) 
 }
 ```
+
 
 
 ```{r train control setup}
